@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Gestion Tournoi Tennis Junior</title>
+
+<!-- Bootstrap pour une mise en page rapide -->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/twitter-bootstrap/5.3.3/css/bootstrap.min.css" />
+
+<!-- SheetJS pour lire les fichiers Excel -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+<style>
+  body { padding: 20px; }
+  #playersTable th,
+  #playersTable td { vertical-align: middle; }
+  .match-row.done { text-decoration: line-through; color: #6c757d; }
+</style>
+</head>
+<body>
+<h1 class="mb-4">Gestion de tournoi de tennis – enfants</h1>
+
+<!-- ===== 1. PARTICIPANTS ===== -->
+<h2>1. Participants</h2>
+<div class="mb-3">
+  <label class="form-label">Importer un fichier Excel/CSV (une colonne = noms)</label>
+  <input type="file" id="fileInput" class="form-control" accept=".csv,.xlsx" />
+</div>
+
+<div class="mb-3">
+  <label class="form-label">Ajouter manuellement (un nom par ligne)</label>
+  <textarea
+    id="manualInput"
+    rows="4"
+    class="form-control"
+    placeholder="Roger Federer&#10;Rafael Nadal"
+  ></textarea>
+</div>
+
+<button class="btn btn-primary mb-3" id="addParticipantsBtn">
+  Ajouter les participants
+</button>
+
+<table class="table table-sm" id="playersTable">
+  <thead>
+    <tr><th>#</th><th>Nom</th><th>Tête de série ?</th></tr>
+  </thead>
+  <tbody></tbody>
+</table>
+
+<hr />
+
+<!-- ===== 2. FORMAT ===== -->
+<h2>2. Format</h2>
+<div class="mb-3">
+  <select id="formatSelect" class="form-select">
+    <option value="open_draw">Open (tirage au sort) – sans consolante</option>
+    <option value="open_consolation">Open (tirage au sort) – avec consolante</option>
+    <option value="pool">Pool (round‑robin)</option>
+  </select>
+</div>
+
+<!-- ===== 3. PARAMÈTRES ===== -->
+<h2>3. Paramètres</h2>
+<div class="row g-3">
+  <div class="col-md-4">
+    <label class="form-label">Nombre de terrains</label>
+    <input type="number" id="courtsInput" class="form-control" min="1" value="2" />
+  </div>
+  <div class="col-md-4">
+    <label class="form-label">Temps d’attente entre les matchs (min)</label>
+    <input type="number" id="waitInput" class="form-control" min="0" value="5" />
+  </div>
+  <div class="col-md-4">
+    <label class="form-label">Heure de début</label>
+    <input type="time" id="startTimeInput" class="form-control" value="09:00" />
+  </div>
+</div>
+
+<div class="form-check form-switch mt-3">
+  <input
+    class="form-check-input"
+    type="checkbox"
+    role="switch"
+    id="toggleEndtime"
+  />
+  <label class="form-check-label" for="toggleEndtime">
+    Fixer l’heure de fin plutôt que la durée d’un match
+  </label>
+</div>
+
+<div id="durationGroup" class="mt-2">
+  <label class="form-label">Durée d’un match (min)</label>
+  <input
+    type="number"
+    id="durationInput"
+    class="form-control"
+    min="5"
+    value="20"
+  />
+</div>
+
+<div id="endtimeGroup" class="mt-2 d-none">
+  <label class="form-label">Heure de fin</label>
+  <input type="time" id="endTimeInput" class="form-control" value="17:00" />
+</div>
+
+<button class="btn btn-success my-4" id="generateBtn">
+  Générer le programme des matchs
+</button>
+
+<hr />
+
+<!-- ===== 4. ORDRE DES MATCHS ===== -->
+<h2>Ordre des matchs</h2>
+<table class="table table-bordered" id="scheduleTable">
+  <thead>
+    <tr>
+      <th>Heure début</th>
+      <th>Heure fin</th>
+      <th>Terrain</th>
+      <th>Joueur A</th>
+      <th>Joueur B</th>
+      <th>Vainqueur</th>
+    </tr>
+  </thead>
+  <tbody></tbody>
+</table>
+
+<!-- ===== 5. CLASSEMENT (pour le format Pool ou consolante) ===== -->
+<div id="standingsSection" class="mt-5 d-none">
+  <h2>Classement</h2>
+  <table class="table table-striped" id="standingsTable">
+    <thead>
+      <tr><th>Rang</th><th>Joueur</th><th>Points</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</div>
+
+<!-- ===== SCRIPTS PRINCIPAUX ===== -->
+<script>
+  // === Données ===
+  const players = []; // { name, seed }
+  let currentMatches = [];   // dernière liste de matchs générée
+  let currentFormat = '';    // format actif (open/pool)
+
+  // === Écouteurs ===
+  document.getElementById('fileInput').addEventListener('change', handleFile);
+  document
+    .getElementById('addParticipantsBtn')
+    .addEventListener('click', addManualParticipants);
+  document
+    .getElementById('generateBtn')
+    .addEventListener('click', generateSchedule);
+  document.getElementById('toggleEndtime').addEventListener('change', (e) => {
+    document
+      .getElementById('durationGroup')
+      .classList.toggle('d-none', e.target.checked);
+    document
+      .getElementById('endtimeGroup')
+      .classList.toggle('d-none', !e.target.checked);
+  });
+
+  // === Lecture de fichiers CSV / Excel ===
+  function handleFile(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    if (file.name.endsWith('.csv')) {
+      const reader = new FileReader();
+      reader.onload = (evt) => {
+        const lines = evt.target.result
+          .split(/[\r\n]+/)
+          .filter((l) => l.trim());
+        lines.forEach((n) => players.push({ name: n.trim(), seed: false }));
+        renderPlayers();
+      };
+      reader.readAsText(file, 'utf-8');
+    } else if (file.name.endsWith('.xlsx')) {
+      const reader = new FileReader();
+      reader.onload = (evt) => {
+        const data = new Uint8Array(evt.target.result);
+        const wb = XLSX.read(data, { type: 'array' });
+        const first = wb.SheetNames[0];
+        const ws = wb.Sheets[first];
+        const json = XLSX.utils.sheet_to_json(ws, { header: 1 });
+        json
+          .flat()
+          .filter(Boolean)
+          .forEach((n) => players.push({ name: n.toString().trim(), seed: false }));
+        renderPlayers();
+      };
+      reader.readAsArrayBuffer(file);
+    } else {
+      alert('Format non supporté ; utilisez .csv ou .xlsx');
+    }
+  }
+
+  // === Ajout manuel ===
+  function addManualParticipants() {
+    const text = document.getElementById('manualInput').value.trim();
+    if (!text) return;
+    text.split(/[\r\n]+/).forEach((n) => players.push({ name: n.trim(), seed: false }));
+    document.getElementById('manualInput').value = '';
+    renderPlayers();
+  }
+
+  // === Affichage de la liste de joueurs ===
+  function renderPlayers() {
+    const tbody = document.querySelector('#playersTable tbody');
+    tbody.innerHTML = '';
+    players.forEach((p, i) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${i + 1}</td>
+        <td>${p.name}</td>
+        <td><input type="checkbox" ${p.seed ? 'checked' : ''} data-index="${i}" class="seedChk" /></td>
+      `;
+      tbody.appendChild(tr);
+    });
+    document.querySelectorAll('.seedChk').forEach((chk) => {
+      chk.addEventListener('change', (e) => {
+        const idx = parseInt(e.target.dataset.index, 10);
+        players[idx].seed = e.target.checked;
+      });
+    });
+  }
+
+  // === Génération du programme ===
+  function generateSchedule() {
+    if (players.length < 2) {
+      alert('Ajoutez au moins deux joueurs');
+      return;
+    }
+
+    // Clone pour éviter les effets de bord
+    const p = players.map((x) => ({ ...x }));
+    const format = document.getElementById('formatSelect').value;
+    const courts = parseInt(document.getElementById('courtsInput').value, 10) || 1;
+    const wait = parseInt(document.getElementById('waitInput').value, 10) || 0;
+    const startTime = document.getElementById('startTimeInput').value;
+    let matchDuration = parseInt(document.getElementById('durationInput').value, 10) || 20;
+
+    // Si l’utilisateur fixe l’heure de fin, on recalcule la durée
+    if (document.getElementById('toggleEndtime').checked) {
+      const endTime = document.getElementById('endTimeInput').value;
+      const totalMatches = estimateTotalMatches(p.length, format);
+      const totalMinutes = timeDiffMinutes(startTime, endTime);
+      matchDuration = Math.floor((totalMinutes - wait * totalMatches) / (totalMatches / courts));
+      if (matchDuration < 5) {
+        alert('Trop peu de temps pour terminer le tournoi');
+        return;
+      }
+    }
+
+    let schedule = [];
+    if (format === 'pool') {
+      schedule = generatePoolSchedule(p, courts, startTime, matchDuration, wait);
+    } else {
+      const consolation = format === 'open_consolation';
+      schedule = generateKnockoutSchedule(
+        p,
+        courts,
+        startTime,
+        matchDuration,
+        wait,
+        consolation
+      );
+    }
+    currentMatches = schedule;
+    currentFormat = format;
+    renderSchedule(currentMatches);
+  }
+
+  // === Utils temps ===
+  function estimateTotalMatches(n, format) {
+    if (format === 'pool') return (n * (n - 1)) / 2; // pool unique
+    let total = n - 1; // simple élimination
+    if (format === 'open_consolation') total += n - 1;
+    return total;
+  }
+
+  function timeStrToDate(t) {
+    const [h, m] = t.split(':').map(Number);
+    const d = new Date();
+    d.setHours(h, m, 0, 0);
+    return d;
+  }
+  function timeDiffMinutes(t1, t2) {
+    return (timeStrToDate(t2) - timeStrToDate(t1)) / 60000;
+  }
+  function datePlusMinutes(d, min) {
+    return new Date(d.getTime() + min * 60000);
+  }
+
+  // Met à jour le classement pour tous les formats
+  function updateStandings() {
+    const section   = document.getElementById('standingsSection');
+    const theadRow  = document.querySelector('#standingsTable thead tr');
+    const tbody     = document.querySelector('#standingsTable tbody');
+    tbody.innerHTML = '';
+
+    if (!currentMatches.length) {
+      section.classList.add('d-none');
+      return;
+    }
+
+    // === Format POOL : points 1/0 ===
+    if (currentFormat === 'pool') {
+      theadRow.innerHTML = '<th>Rang</th><th>Joueur</th><th>Points</th>';
+      const points = {};
+      players.forEach(p => points[p.name] = 0);
+      currentMatches
+        .filter(m => m.round === 'Pool' && m.winner)
+        .forEach(m => { points[m.winner] += 1; });
+
+      const sorted = Object.entries(points)
+        .sort((a, b) => b[1] - a[1]);
+
+      sorted.forEach(([name, pts], idx) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${idx + 1}</td><td>${name}</td><td>${pts}</td>`;
+        tbody.appendChild(tr);
+      });
+      section.classList.remove('d-none');
+      return;
+    }
+
+    // === Formats OPEN : classement basé sur les victoires / tour atteint ===
+    theadRow.innerHTML = '<th>Rang</th><th>Joueur</th><th>Victoires</th><th>Statut</th>';
+
+    // Préparation des stats
+    const stats = {};
+    players.forEach(p => stats[p.name] = { wins: 0, eliminated: false, lostRound: 0 });
+
+    const numericMatches = currentMatches.filter(m => typeof m.round === 'number');
+    const maxRound = Math.max(...numericMatches.map(m => m.round));
+
+    numericMatches.forEach(m => {
+      if (!m.winner) return; // match pas encore joué
+      const loser = m.winner === m.p1 ? m.p2 : m.p1;
+      if (!stats[m.winner]) return; // sécurité BYE / placeholders
+      stats[m.winner].wins += 1;
+      if (stats[loser]) {
+        stats[loser].eliminated = true;
+        stats[loser].lostRound  = m.round;
+      }
+    });
+
+    // Trouver la finale (si jouée) pour déterminer vainqueur / finaliste
+    const finalMatch = numericMatches.find(m => m.round === maxRound);
+
+    // Fonction de score pour le tri
+    function scoreOf(s) {
+      const base = s.wins * 100;
+      if (!s.eliminated) return base + maxRound + 1; // encore en lice
+      return base + s.lostRound; // plus on va loin, plus lostRound est grand
+    }
+
+    const sortedPlayers = Object.entries(stats)
+      .sort((a, b) => scoreOf(b[1]) - scoreOf(a[1]));
+
+    sortedPlayers.forEach(([name, s], idx) => {
+      let statut;
+      if (!s.eliminated) {
+        if (finalMatch && finalMatch.winner) {
+          statut = (name === finalMatch.winner) ? 'Vainqueur' : 'Finaliste';
+        } else {
+          statut = 'En cours';
+        }
+      } else {
+        statut = `Éliminé R${s.lostRound}`;
+      }
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${idx + 1}</td><td>${name}</td><td>${s.wins}</td><td>${statut}</td>`;
+      tbody.appendChild(tr);
+    });
+
+    section.classList.remove('d-none');
+  }
+
+  // === Génération Knock‑Out ===
+  function generateKnockoutSchedule(players, courts, startTime, duration, wait, consolation) {
+    shuffle(players);
+
+    // Les têtes de série en premier pour recevoir d’éventuels bye
+    const seeds = players.filter((p) => p.seed);
+    const others = players.filter((p) => !p.seed);
+    let ordered = [...seeds, ...others];
+
+    const bracketSize = Math.pow(2, Math.ceil(Math.log2(ordered.length)));
+    while (ordered.length < bracketSize) ordered.push({ name: 'BYE', seed: false });
+
+    const rounds = Math.log2(bracketSize);
+    const matches = [];
+    let roundPlayers = ordered;
+    let startDates = Array(courts).fill(timeStrToDate(startTime));
+
+    for (let r = 1; r <= rounds; r++) {
+      const newPlayers = [];
+      for (let i = 0; i < roundPlayers.length; i += 2) {
+        const p1 = roundPlayers[i];
+        const p2 = roundPlayers[i + 1];
+
+        if (p1.name === 'BYE') {
+          newPlayers.push(p2);
+          continue;
+        }
+        if (p2.name === 'BYE') {
+          newPlayers.push(p1);
+          continue;
+        }
+
+        const courtIdx = earliestCourtIndex(startDates);
+        const matchStart = new Date(startDates[courtIdx]);
+        const matchEnd = datePlusMinutes(matchStart, duration);
+
+        matches.push({
+          round: r,
+          court: courtIdx + 1,
+          start: matchStart,
+          end: matchEnd,
+          p1: p1.name,
+          p2: p2.name,
+          winner: null,
+        });
+
+        startDates[courtIdx] = datePlusMinutes(matchEnd, wait);
+        newPlayers.push({ name: `G${matches.length}`, seed: false }); // G = Winner “Gagnant”
+      }
+      roundPlayers = newPlayers;
+    }
+
+    // === Consolante simple : perdants du 1ᵉʳ tour ===
+    if (consolation) {
+      const losers = matches
+        .filter((m) => m.round === 1)
+        .map((m, i) => ({ name: `L${i + 1}`, seed: false }));
+      for (let i = 0; i < losers.length; i += 2) {
+        if (i + 1 >= losers.length) break;
+        const courtIdx = earliestCourtIndex(startDates);
+        const matchStart = new Date(startDates[courtIdx]);
+        const matchEnd = datePlusMinutes(matchStart, duration);
+        matches.push({
+          round: 'Consolante',
+          court: courtIdx + 1,
+          start: matchStart,
+          end: matchEnd,
+          p1: losers[i].name,
+          p2: losers[i + 1].name,
+          winner: null,
+        });
+        startDates[courtIdx] = datePlusMinutes(matchEnd, wait);
+      }
+    }
+    return matches;
+  }
+
+  // === Génération Pool (round‑robin unique) ===
+  function generatePoolSchedule(players, courts, startTime, duration, wait) {
+    const matches = [];
+    const startDates = Array(courts).fill(timeStrToDate(startTime));
+
+    for (let i = 0; i < players.length; i++) {
+      for (let j = i + 1; j < players.length; j++) {
+        const courtIdx = earliestCourtIndex(startDates);
+        const matchStart = new Date(startDates[courtIdx]);
+        const matchEnd = datePlusMinutes(matchStart, duration);
+
+        matches.push({
+          round: 'Pool',
+          court: courtIdx + 1,
+          start: matchStart,
+          end: matchEnd,
+          p1: players[i].name,
+          p2: players[j].name,
+          winner: null,
+        });
+
+        startDates[courtIdx] = datePlusMinutes(matchEnd, wait);
+      }
+    }
+    matches.sort((a, b) => a.start - b.start);
+    return matches;
+  }
+
+  // === Divers ===
+  function shuffle(a) {
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+  }
+
+  // Propage le vainqueur (et le perdant pour la consolante) vers les matchs suivants
+  function propagateWinner(matchIdx) {
+    if (!currentMatches[matchIdx].winner) return;
+
+    // Vainqueur -> placeholders G{n}
+    const winnerPlaceholder = `G${matchIdx + 1}`;
+    currentMatches.forEach((m, j) => {
+      if (j <= matchIdx) return;
+      if (m.p1 === winnerPlaceholder) m.p1 = currentMatches[matchIdx].winner;
+      if (m.p2 === winnerPlaceholder) m.p2 = currentMatches[matchIdx].winner;
+    });
+
+    // Perdant -> placeholders L{n} (seulement si consolante)
+    if (currentFormat === 'open_consolation' && currentMatches[matchIdx].round === 1) {
+      const loser = currentMatches[matchIdx].p1 === currentMatches[matchIdx].winner
+        ? currentMatches[matchIdx].p2
+        : currentMatches[matchIdx].p1;
+      const loserPlaceholder = `L${matchIdx + 1}`;
+      currentMatches.forEach((m, j) => {
+        if (j <= matchIdx) return;
+        if (m.p1 === loserPlaceholder) m.p1 = loser;
+        if (m.p2 === loserPlaceholder) m.p2 = loser;
+      });
+    }
+
+    // Met à jour les cellules correspondantes dans la table
+    currentMatches.forEach((m, j) => {
+      const row = document.querySelector(`tr[data-row='${j}']`);
+      if (!row) return;
+      row.children[3].textContent = m.p1;
+      row.children[4].textContent = m.p2;
+      const sel = row.querySelector('select');
+      if (sel) {
+        sel.options[1].text = m.p1;
+        sel.options[2].text = m.p2;
+      }
+    });
+  }
+
+  // Renvoie l'indice du terrain disponible le plus tôt
+  function earliestCourtIndex(arr) {
+    let idx = 0;
+    for (let i = 1; i < arr.length; i++) {
+      if (arr[i] < arr[idx]) idx = i;
+    }
+    return idx;
+  }
+
+  // === Affichage du programme ===
+  function renderSchedule(matches) {
+    const tbody = document.querySelector('#scheduleTable tbody');
+    tbody.innerHTML = '';
+    matches.forEach((m, idx) => {
+      const tr = document.createElement('tr');
+      tr.setAttribute('data-row', idx);
+      tr.classList.add('match-row');
+      tr.innerHTML = `
+        <td>${m.start.toLocaleTimeString('fr-CH', { hour: '2-digit', minute: '2-digit' })}</td>
+        <td>${m.end.toLocaleTimeString('fr-CH', { hour: '2-digit', minute: '2-digit' })}</td>
+        <td>${m.court}</td>
+        <td>${m.p1}</td>
+        <td>${m.p2}</td>
+        <td>
+          <select data-idx="${idx}" class="form-select form-select-sm">
+            <option value="">–</option>
+            <option value="p1">${m.p1}</option>
+            <option value="p2">${m.p2}</option>
+          </select>
+        </td>
+      `;
+      tbody.appendChild(tr);
+    });
+
+    // === Sélection du vainqueur : on grise la ligne ===
+    document.querySelectorAll('[data-idx]').forEach((sel) => {
+      sel.addEventListener('change', (e) => {
+        const i = parseInt(e.target.dataset.idx, 10);
+        matches[i].winner =
+          e.target.value === 'p1'
+            ? matches[i].p1
+            : e.target.value === 'p2'
+            ? matches[i].p2
+            : null;
+        e.target.closest('tr').classList.toggle('done', !!matches[i].winner);
+        propagateWinner(i);
+        updateStandings();
+      });
+    });
+    updateStandings();
+  }
+</script>
+</body>
+</html>
